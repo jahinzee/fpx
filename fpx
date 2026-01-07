@@ -1,0 +1,249 @@
+#!/usr/bin/env python
+#
+# /// script
+# name = "fpx"
+# version = "0.1.0"
+# description = "Run Flatpak applications using short names."
+# readme = "README.md"
+# requires-python = ">=3.13"
+# ///
+
+# fpx: Run Flatpak applications using short names.
+#
+# Author: Jahin Z. <jahinzee>
+#
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+#
+
+from pathlib import Path
+from typing import NamedTuple, Optional, NoReturn
+from argparse import ArgumentParser, Namespace
+
+import subprocess
+import shutil
+import sys
+import json
+import os
+import platform
+
+# region data
+# fmt: off
+
+KNOWN_ALIASES: dict[str, str] = {
+    # Definitions for alias overrides for application aliases where autoguessing fall short.
+    #
+    # Manual aliases should be defined for the following reasons (list is inexhaustive and
+    # non-authoritative, there may well be other reasons!):
+    #
+    #  * The alias can't be found automatically.
+    #  * The found alias is unsuitable for exporting -- e.g. name too vague or unhelpful as an
+    #    alias, or has a high chance of conflicting with other binaries.
+    #  * The app has another more well-established alias from some other source (i.e. a native
+    #    package version) that isn't reflected in the Flatpak manifest.
+    #
+
+    # Firefox and Thunderbird deploys themselves in a way where the manifest doesn't have any
+    # explicit references to a binary to run in the Flatpak sandbox, and it uses some other way of
+    # executing.
+    #
+    "org.mozilla.Thunderbird": "thunderbird",
+    "org.mozilla.firefox": "firefox",
+    
+    # The manifest command uses the highly generic 'run', which isn't very descriptive and might
+    # conflict with other apps.
+    #
+    "com.authormore.penpotdesktop": "penpot-desktop",
+}
+
+REMOVE_SUFFIXES: set[str] = {
+    # Common suffixes to remove from an alias, such as script extensions.
+    # 
+    ".sh"
+}
+
+# fmt: on
+# endregion
+
+
+def fatal_error(message: str):
+    print(f"fpx: {message}", file=sys.stderr)
+    exit(1)
+
+
+def get_flatpak_binary() -> Path:
+    result = shutil.which("flatpak")
+    if result is None:
+        fatal_error("Flatpak is not installed or unavailable in PATH.")
+        exit(1)
+    else:
+        return Path(result)
+
+
+class FlatpakListing(NamedTuple):
+    id: str
+    installation: str
+
+    def __str__(self) -> str:
+        return f"{self.id} ({self.installation})"
+
+
+def get_flatpak_launch_binary(listing: FlatpakListing) -> Optional[str]:
+    manifest_path = Path(f"/var/lib/flatpak/app/{listing.id}/current/active/files/manifest.json")
+    try:
+        with open(manifest_path, "r") as manifest_file:
+            data = json.load(manifest_file)
+            output = data["command"]
+    except (FileNotFoundError, KeyError):
+        return None
+
+    for suffix in REMOVE_SUFFIXES:
+        if output.endswith(suffix):
+            output = output.removesuffix(suffix)
+            break
+    return output
+
+
+def get_normalised_last_of_triple(listing: FlatpakListing) -> str:
+    _, _, last = listing.id.split(".", 2)
+    return last.lower()
+
+
+def get_flatpak_alias(listing: FlatpakListing) -> str:
+    if known_alias := KNOWN_ALIASES.get(listing.id, None):
+        return known_alias
+    if launch_binary := get_flatpak_launch_binary(listing):
+        return launch_binary
+    return get_normalised_last_of_triple(listing)
+
+
+def get_flatpaks(flatpak: Path) -> tuple[FlatpakListing, ...]:
+    def process_flatpak_line(line: str) -> Optional[FlatpakListing]:
+        if line == "":
+            return None
+        ref, installation = line.split("\t", 1)
+        id = ref.split("/", 1)[0]
+        return FlatpakListing(id, installation)
+
+    result = subprocess.run(
+        (flatpak, "list", "--app", "--columns=ref,installation", "--user", "--system"), 
+        capture_output=True,
+        text=True)  # fmt: skip
+    if result.returncode != 0:
+        fatal_error(f"'flatpak' command failed with exit code {result.returncode}.")
+
+    stdout = result.stdout.split("\n")
+    processed = (process_flatpak_line(line) for line in stdout)
+    return tuple(line for line in processed if line is not None)
+
+
+def exec_flatpak(
+    flatpak_exec: Path,
+    flatpak_listing: FlatpakListing,
+    args: list[str],
+    *,
+    detached: bool = False,
+    print_only: bool = False,
+) -> NoReturn:
+    command = (
+        f"--{flatpak_listing.installation}",
+        "run",
+        flatpak_listing.id,
+        # Don't separate args with '--' if any flag-like params are supposed to be passed.
+        # This should allow for help flags to be seamlessly passed through to the backend app.
+        #
+        *(() if any(a.startswith("-") for a in args) else ("--",)),
+        *args,
+    )
+    if print_only:
+        print(flatpak_exec, *command)
+        exit(0)
+
+    if detached:
+        subprocess.Popen(
+            (flatpak_exec, *command),
+            start_new_session=True,
+            stdin=sys.stdin,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        exit(0)
+    else:
+        os.execv(flatpak_exec, command)
+
+
+def get_flatpaks_and_aliases(flatpak: Path) -> dict[str, FlatpakListing]:
+    return {get_flatpak_alias(fp): fp for fp in get_flatpaks(flatpak)}
+
+
+def get_args() -> tuple[Namespace, list[str]]:
+    parser = ArgumentParser(
+        "fpx",
+        description="Run Flatpak applications using short names.",
+    )
+    parser.add_argument(
+        "alias",
+        type=str,
+        nargs="?",
+        default=None,
+        help="alias of the Flatpak to run (required unless '--list' is used)",
+    )
+    parser.add_argument(
+        "-l",
+        "--list",
+        action="store_true",
+        help="list all available Flatpak aliases",
+    )
+    parser.add_argument(
+        "-d",
+        "--detach",
+        action="store_true",
+        help="run Flatpak as a detached process in the background",
+    )
+    parser.add_argument(
+        "-p",
+        "--print",
+        action="store_true",
+        help="output full Flatpak name and installation instead of running",
+    )
+    parser.add_argument(
+        "-t",
+        "--test",
+        action="store_true",
+        help="output intended 'flatpak run' command instead of running",
+    )
+    return parser.parse_known_args()
+
+
+def main():
+    if platform.system() != "Linux":
+        fatal_error("This script can only run on Linux systems.")
+
+    flatpak = get_flatpak_binary()
+    args, passed_args = get_args()
+
+    aliased_flatpaks = get_flatpaks_and_aliases(flatpak)
+
+    if args.list:
+        for alias, listing in sorted(aliased_flatpaks.items()):
+            print(f"{alias} -> {str(listing)}")
+        exit(0)
+
+    if args.alias is None:
+        fatal_error("Missing alias to execute. Run 'fpx --help' for usage.")
+
+    target = aliased_flatpaks.get(args.alias, None)
+    if target is None:
+        fatal_error("Unknown alias. Run 'fpx --list' to see available aliases.")
+    assert target is not None
+
+    if args.print:
+        print(str(target))
+        exit(0)
+
+    exec_flatpak(flatpak, target, passed_args, detached=args.detach, print_only=args.test)
+
+
+if __name__ == "__main__":
+    main()
