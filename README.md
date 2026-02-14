@@ -13,7 +13,7 @@ All in a single Python script, no external dependencies.
 ## Install
 
 Simply download, or clone and move (or symlink) the `fpx` script to somewhere on your PATH, such
-as `~/.local/bin`. It's a single Python script, no 
+as `~/.local/bin`. It's a single Python script, no external dependencies.
 
 ## Usage
 
