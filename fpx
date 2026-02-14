@@ -2,7 +2,7 @@
 #
 # /// script
 # name = "fpx"
-# version = "0.1.0"
+# version = "0.1.1"
 # description = "Run Flatpak applications using short names."
 # readme = "README.md"
 # requires-python = ">=3.13"
@@ -51,10 +51,16 @@ KNOWN_ALIASES: dict[str, str] = {
     "org.mozilla.Thunderbird": "thunderbird",
     "org.mozilla.firefox": "firefox",
     
-    # The manifest command uses the highly generic 'run', which isn't very descriptive and might
+    # These manifests' commands use the highly generic 'run', which isn't very descriptive and might
     # conflict with other apps.
     #
     "com.authormore.penpotdesktop": "penpot-desktop",
+    "io.podman_desktop.PodmanDesktop": "podman-desktop",
+
+    # Aliases for mapping wrappers to better known aliases.
+    #
+    "dev.zed.Zed": "zed-editor",
+    "dev.vencord.Vesktop": "vesktop",
 }
 
 REMOVE_SUFFIXES: set[str] = {
